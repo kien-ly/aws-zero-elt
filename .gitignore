@@ -151,3 +151,4 @@ site/
 # Jupyter Notebooks
 .ipynb_checkpoints/
 src/lambda/.git.bak
+src/lambda/.git
