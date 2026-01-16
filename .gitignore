@@ -1,0 +1,152 @@
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.env
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# =============================================================================
+# AWS SAM
+# =============================================================================
+.aws-sam/
+samconfig.toml.bak
+packaged.yaml
+
+# SAM build artifacts
+.aws-sam/build/
+.aws-sam/cache/
+
+# =============================================================================
+# IDE / Editors
+# =============================================================================
+# VSCode
+.vscode/
+*.code-workspace
+
+# JetBrains (PyCharm, IntelliJ)
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# =============================================================================
+# OS Generated
+# =============================================================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+
+# =============================================================================
+# Logs and Databases
+# =============================================================================
+*.log
+*.sql.bak
+*.sqlite
+*.sqlite3
+*.db
+
+# =============================================================================
+# Secrets and Credentials
+# =============================================================================
+# Environment files (except examples)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# AWS credentials
+.aws/
+credentials
+config
+
+# Private keys
+*.pem
+*.key
+*.p12
+*.pfx
+
+# =============================================================================
+# Project Specific
+# =============================================================================
+# Local test outputs
+test_output/
+tmp/
+temp/
+
+# Lambda layer dependencies (if building locally)
+layer/python/
+
+# Node.js (if using for frontend/tooling)
+node_modules/
+package-lock.json
+yarn.lock
+
+# Coverage reports
+coverage/
+*.lcov
+
+# Documentation builds
+docs/_build/
+site/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/

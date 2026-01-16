@@ -1,0 +1,425 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  AWS Zero-ETL Demo: JSONPlaceholder -> Lambda -> Aurora MySQL -> Redshift
+
+Globals:
+  Function:
+    Timeout: 60
+    MemorySize: 256
+    Runtime: python3.12
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+  DBName:
+    Type: String
+    Default: zero_etl_db
+  DBUsername:
+    Type: String
+    Default: admin
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: Database password (min 8 characters)
+  VpcCIDR:
+    Type: String
+    Default: 10.0.0.0/16
+  PrivateSubnet1CIDR:
+    Type: String
+    Default: 10.0.1.0/24
+  PrivateSubnet2CIDR:
+    Type: String
+    Default: 10.0.2.0/24
+  PublicSubnetCIDR:
+    Type: String
+    Default: 10.0.3.0/24
+
+Resources:
+  # =============================================================================
+  # VPC and Networking
+  # =============================================================================
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-igw
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Private Subnets for Aurora (Multi-AZ)
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-private-subnet-1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-private-subnet-2
+
+  # Public Subnet for NAT Gateway
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnetCIDR
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-public-subnet
+
+  # NAT Gateway for Lambda outbound internet access
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-nat-eip
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-nat-gw
+
+  # Route Tables
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-public-rt
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-private-rt
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # =============================================================================
+  # Security Groups
+  # =============================================================================
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Lambda function
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS outbound for API calls
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: !Ref VpcCIDR
+          Description: MySQL outbound to Aurora
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-lambda-sg
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Aurora MySQL
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+          Description: MySQL access from Lambda
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-db-sg
+
+  # =============================================================================
+  # Aurora MySQL Cluster (Zero-ETL enabled)
+  # =============================================================================
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for Aurora MySQL
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-db-subnet-group
+
+  # Parameter Group with Zero-ETL required settings
+  DBClusterParameterGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Properties:
+      Family: aurora-mysql8.0
+      Description: Parameter group for Zero-ETL integration
+      Parameters:
+        # Required for Zero-ETL integration
+        binlog_format: ROW
+        aurora_enhanced_binlog: "1"
+        binlog_row_image: FULL
+        # Performance settings
+        innodb_flush_log_at_trx_commit: "2"
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-db-cluster-params
+
+  AuroraDBCluster:
+    Type: AWS::RDS::DBCluster
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBClusterIdentifier: !Sub ${AWS::StackName}-cluster
+      Engine: aurora-mysql
+      EngineVersion: 8.0.mysql_aurora.3.04.0
+      DatabaseName: !Ref DBName
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBClusterParameterGroupName: !Ref DBClusterParameterGroup
+      VpcSecurityGroupIds:
+        - !Ref DBSecurityGroup
+      StorageEncrypted: true
+      BackupRetentionPeriod: 7
+      EnableCloudwatchLogsExports:
+        - error
+        - general
+        - slowquery
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-aurora-cluster
+        - Key: Environment
+          Value: !Ref Environment
+
+  AuroraDBInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub ${AWS::StackName}-instance-1
+      DBClusterIdentifier: !Ref AuroraDBCluster
+      DBInstanceClass: db.r6g.large
+      Engine: aurora-mysql
+      PubliclyAccessible: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-aurora-instance
+        - Key: Environment
+          Value: !Ref Environment
+
+  # =============================================================================
+  # Lambda Function
+  # =============================================================================
+  IngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-ingest
+      Description: Ingest data from JSONPlaceholder API to Aurora MySQL
+      CodeUri: src/lambda/
+      Handler: handler.lambda_handler
+      Architectures:
+        - x86_64
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+      Environment:
+        Variables:
+          DB_HOST: !GetAtt AuroraDBCluster.Endpoint.Address
+          DB_PORT: !GetAtt AuroraDBCluster.Endpoint.Port
+          DB_NAME: !Ref DBName
+          DB_USER: !Ref DBUsername
+          DB_PASSWORD: !Ref DBPassword
+          API_ENDPOINT: https://jsonplaceholder.typicode.com
+          LOG_LEVEL: INFO
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: "*"
+            - Effect: Allow
+              Action:
+                - ec2:CreateNetworkInterface
+                - ec2:DescribeNetworkInterfaces
+                - ec2:DeleteNetworkInterface
+              Resource: "*"
+      Events:
+        ScheduledIngestion:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+            Description: Trigger data ingestion every 5 minutes
+            Enabled: true
+      Tags:
+        Environment: !Ref Environment
+
+  # CloudWatch Log Group for Lambda
+  IngestFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${IngestFunction}
+      RetentionInDays: 14
+
+  # =============================================================================
+  # CloudWatch Alarms for Monitoring
+  # =============================================================================
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-lambda-errors
+      AlarmDescription: Alarm when Lambda function errors exceed threshold
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref IngestFunction
+
+  LambdaDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-lambda-duration
+      AlarmDescription: Alarm when Lambda duration exceeds 50 seconds
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 50000
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref IngestFunction
+
+# =============================================================================
+# Outputs
+# =============================================================================
+Outputs:
+  VpcId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${AWS::StackName}-VpcId
+
+  AuroraClusterEndpoint:
+    Description: Aurora MySQL cluster endpoint
+    Value: !GetAtt AuroraDBCluster.Endpoint.Address
+    Export:
+      Name: !Sub ${AWS::StackName}-AuroraEndpoint
+
+  AuroraClusterPort:
+    Description: Aurora MySQL cluster port
+    Value: !GetAtt AuroraDBCluster.Endpoint.Port
+    Export:
+      Name: !Sub ${AWS::StackName}-AuroraPort
+
+  AuroraClusterArn:
+    Description: Aurora MySQL cluster ARN
+    Value: !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:${AuroraDBCluster}
+    Export:
+      Name: !Sub ${AWS::StackName}-AuroraClusterArn
+
+  IngestFunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt IngestFunction.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-IngestFunctionArn
+
+  IngestFunctionName:
+    Description: Lambda function name
+    Value: !Ref IngestFunction
+    Export:
+      Name: !Sub ${AWS::StackName}-IngestFunctionName
+
+  DatabaseName:
+    Description: Database name
+    Value: !Ref DBName
+
+  StackRegion:
+    Description: AWS Region
+    Value: !Ref AWS::Region
